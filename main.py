@@ -6,45 +6,56 @@ import numpy as np
 import tensorflow as tf
 import uvicorn
 import time
+import os
+import requests
 
 app = FastAPI()
 
 # -------------------------
-# CORS (open for local Next.js dev)
+# CORS (open for dev; restrict in prod)
 # -------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ],
+    allow_origins=["*"],  # in production: replace with your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------------
-# Load Keras model
+# Model Setup
 # -------------------------
 MODEL_PATH = "modelres50.h5"
+MODEL_URL = "https://huggingface.co/anuuuuuragggggg/brain-tumor-resnet50/blob/main/modelres50.h5"
+
+# 🔺 Replace <username>/<repo-name> with your Hugging Face repo details
+
+# Download model if not present
+if not os.path.exists(MODEL_PATH):
+    print("Downloading model from Hugging Face...")
+    r = requests.get(MODEL_URL, stream=True)
+    with open(MODEL_PATH, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print("Model downloaded successfully.")
+
+# Load model
 model = tf.keras.models.load_model(MODEL_PATH)
 
-# Make sure class order matches your training
+# Class labels (must match training order)
 CLASS_NAMES = ['glioma', 'meningioma', 'notumor', 'pituitary']
 
 # -------------------------
-# Preprocessing (match training: 200x200 RGB, normalized)
+# Preprocessing (match training: 200x200 RGB normalized)
 # -------------------------
 TARGET_SIZE = (200, 200)
 
 def preprocess_pil_to_model_input(img: Image.Image) -> np.ndarray:
-    """
-    Match model input: (200, 200, 3) normalized to [0,1]
-    """
     img = img.convert("RGB")                        # 3 channels
-    img = img.resize(TARGET_SIZE, Image.BILINEAR)   # resize to 200x200
-    arr = np.array(img, dtype=np.float32) / 255.0   # normalize to [0,1]
-    arr = np.expand_dims(arr, axis=0)               # shape: (1, 200, 200, 3)
+    img = img.resize(TARGET_SIZE, Image.BILINEAR)   # resize
+    arr = np.array(img, dtype=np.float32) / 255.0   # normalize
+    arr = np.expand_dims(arr, axis=0)               # shape (1, 200, 200, 3)
     return arr
 
 # -------------------------
@@ -52,7 +63,6 @@ def preprocess_pil_to_model_input(img: Image.Image) -> np.ndarray:
 # -------------------------
 @app.post("/infer")
 async def infer(file: UploadFile = File(...)):
-    # Read uploaded image
     raw = await file.read()
     img = Image.open(io.BytesIO(raw))
     orig_w, orig_h = img.size
@@ -65,16 +75,14 @@ async def infer(file: UploadFile = File(...)):
     preds = model.predict(x)
     infer_ms = int((time.perf_counter() - t0) * 1000)
 
-    # Ensure shape (1, 4)
-    preds = np.squeeze(preds)      # (4,)
+    # Format predictions
+    preds = np.squeeze(preds)  # (4,)
     probs = preds.astype(float).tolist()
 
-    # Top-1 prediction
     top_idx = int(np.argmax(preds))
     label = CLASS_NAMES[top_idx]
-    prob  = float(preds[top_idx])
+    prob = float(preds[top_idx])
 
-    # Build top-k list in CLASS_NAMES order
     topk = [{"label": cls, "prob": float(p)} for cls, p in zip(CLASS_NAMES, probs)]
 
     return {
@@ -104,7 +112,8 @@ def health():
     return {"ok": True}
 
 # -------------------------
-# Run (for local testing)
+# Run (local + Render)
 # -------------------------
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8888, reload=True)
+    port = int(os.environ.get("PORT", 8000))  # Render provides PORT, fallback = 8000
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
